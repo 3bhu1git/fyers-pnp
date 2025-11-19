@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, unquote_plus, urlparse
 
 import requests
 import yaml
+from fyers_apiv3 import fyersModel
 
 # -------------------------
 # Exceptions
@@ -363,9 +364,16 @@ class FyersAuthConfig:
 
 
 class FyersAuth:
-    # Token endpoint: try production first, fallback to trading environment
-    TOKEN_URL = "https://api.fyers.in/api/v3/token"  # Production endpoint
-    TOKEN_URL_T1 = "https://api-t1.fyers.in/api/v3/token"  # Trading environment endpoint
+    """
+    Fyers API v3 Authentication Manager using official fyers-apiv3 SDK.
+    
+    Wraps fyers_apiv3.SessionModel with:
+    - Config-based inputs (creds.yaml + config.json)
+    - Token persistence
+    - Automatic token refresh
+    - Comprehensive logging
+    - Background service support
+    """
     AUTH_CODE_URL = "https://api-t1.fyers.in/api/v3/generate-authcode"
 
     def __init__(self, creds_path: str = "creds.yaml", config_path: str = "config.json"):
@@ -381,44 +389,53 @@ class FyersAuth:
         self.token_expiry: Optional[datetime] = None
         self._stop_refresh = threading.Event()
         self._refresh_thread: Optional[threading.Thread] = None
+        self._session: Optional[fyersModel.SessionModel] = None
 
+        # Initialize Fyers SDK SessionModel
+        self._init_session()
         self._load_tokens()
-
-    def _calc_app_id_hash(self, use_base_app_id: bool = True) -> str:
-        """
-        FYERS expects SHA256 of the string: "<app_id>:<secret_key>"
-        
-        Args:
-            use_base_app_id: If True, strips -100 suffix from client_id (for v3).
-                           If False, uses full client_id (for v2 compatibility).
-        
-        Return hex digest (lowercase).
-        
-        Example: 
-        - If client_id is "CDKC8R8C9K-100" and use_base_app_id=True, use "CDKC8R8C9K"
-        - If use_base_app_id=False, use "CDKC8R8C9K-100"
-        """
+    
+    def _init_session(self) -> None:
+        """Initialize Fyers SDK SessionModel"""
         client_id = self.config.get("client_id")
-        secret = self.config.get("secret_key")
-
-        # Defensive checks
-        if not client_id or not secret:
-            self.logger.error("Missing client_id or secret_key in config when computing appIdHash")
-            raise FyersAuthError("Missing client_id or secret_key for appIdHash computation")
-
-        # Extract app_id based on flag
-        if use_base_app_id:
-            # Fyers v3: strip -100 suffix for appIdHash
-            app_id = client_id.rstrip("-100") if client_id.endswith("-100") else client_id
-        else:
-            # Use full client_id (v2 format)
-            app_id = client_id
+        secret_key = self.config.get("secret_key")
+        redirect_uri = self.config.get("redirect_uri")
         
-        # Compute SHA-256 hash of "app_id:secret_key"
-        raw = f"{app_id}:{secret}"
-        appid_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        self.logger.debug("Computed appIdHash: app_id=%s, hash_prefix=%s...", app_id, appid_hash[:20])
-        return appid_hash
+        self._session = fyersModel.SessionModel(
+            client_id=client_id,
+            secret_key=secret_key,
+            redirect_uri=redirect_uri,
+            response_type="code",
+            grant_type="authorization_code"
+        )
+        self.logger.debug("Initialized Fyers SDK SessionModel")
+    
+    def get_auth_url(self) -> str:
+        """
+        Generate authorization URL using Fyers SDK.
+        
+        Returns:
+            Authorization URL string
+        """
+        if not self._session:
+            raise FyersAuthError("Session not initialized")
+        
+        try:
+            auth_url = self._session.generate_authcode()
+            self.logger.debug("Generated auth URL via SDK")
+            return auth_url
+        except Exception as e:
+            self.logger.error("Error generating auth URL via SDK: %s", e)
+            # Fallback to manual URL construction
+            client_id = self.config.get("client_id")
+            redirect_uri = self.config.get("redirect_uri")
+            state = self.config.get("state", "")
+            scope = self.config.get("scope", "")
+            return (
+                f"{self.AUTH_CODE_URL}?client_id={client_id}"
+                f"&redirect_uri={redirect_uri}&response_type=code&state={state}&scope={scope}"
+            )
+
 
     def _load_tokens(self) -> None:
         if not self.token_file.exists():
@@ -457,169 +474,241 @@ class FyersAuth:
         except Exception as e:
             self.logger.error("Failed to save tokens: %s", e)
 
-    def _exchange_code_for_token(self, auth_code: str) -> bool:
+    def set_token(self, auth_code: str) -> None:
         """
-        Exchange authorization code for access token and refresh token.
-        Uses appIdHash (SHA-256 of app_id:secret_key) for authentication.
+        Set the authorization code using Fyers SDK.
         
-        Expected response format:
-        {
-            's': 'ok',
-            'code': 200,
-            'message': '',
-            'access_token': 'eyJ0eXAi...',
-            'refresh_token': 'eyJ0eXAi...'
-        }
+        Args:
+            auth_code: Authorization code from OAuth2 flow
         """
-        # Try with base app_id first (v3 format)
-        app_id_hash = self._calc_app_id_hash(use_base_app_id=True)
-        payload = {
-            "grant_type": "authorization_code",
-            "appIdHash": app_id_hash,
-            "code": auth_code
-        }
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if not self._session:
+            raise FyersAuthError("Session not initialized")
         
-        self.logger.info("Exchanging auth_code for tokens (prefix): %s...", auth_code[:20] if auth_code else "None")
-        self.logger.debug("Token exchange payload: grant_type=%s, appIdHash=%s...", payload["grant_type"], app_id_hash[:20])
-        self.logger.debug("Token endpoint: %s", self.TOKEN_URL)
+        self._session.set_token(auth_code)
+        self.logger.debug("Auth code set via SDK (prefix): %s...", auth_code[:20] if auth_code else "None")
+    
+    def generate_token(self) -> Dict[str, Any]:
+        """
+        Generate access token using Fyers SDK.
         
-        # Log full payload for debugging (without exposing secret)
-        client_id = self.config.get("client_id")
-        app_id_base = client_id.rstrip("-100") if client_id.endswith("-100") else client_id
-        self.logger.debug("Using app_id for hash: %s (from client_id: %s)", app_id_base, client_id)
+        Returns:
+            Dictionary with response containing access_token, refresh_token, etc.
+            Returns empty dict on failure.
+        """
+        if not self._session:
+            raise FyersAuthError("Session not initialized")
         
         try:
-            # Use trading environment endpoint (api-t1) since auth_code comes from there
-            # The token exchange should use the same environment as auth code generation
-            token_endpoint = self.TOKEN_URL_T1
-            self.logger.debug("Using trading environment token endpoint: %s", token_endpoint)
+            self.logger.info("Generating token using Fyers SDK...")
+            response = self._session.generate_token()
             
-            # Retry logic for 503 errors (server might be temporarily unavailable)
-            max_retries = 3
-            retry_delay = 2  # seconds
-            r = None
-            
-            for attempt in range(max_retries):
-                if attempt > 0:
-                    self.logger.info("Retry attempt %d/%d after %d seconds...", attempt, max_retries, retry_delay)
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+            if response.get('s') == 'ok':
+                # Extract tokens from SDK response
+                access_token = response.get('access_token')
+                refresh_token = response.get('refresh_token')
                 
-                r = requests.post(token_endpoint, json=payload, headers=headers, timeout=30)
-                
-                # If successful or non-503 error, break retry loop
-                if r.status_code != 503:
-                    break
-            
-            # Parse response
-            try:
-                data = r.json()
-            except Exception as e:
-                # Handle HTML error responses (like 503)
-                if r.status_code == 503:
-                    self.logger.error("503 Service Temporarily Unavailable from token endpoint after %d retries", max_retries)
-                    self.logger.error("Response: %s", r.text[:200])
-                    self.logger.warning("This might be a temporary server issue. Please try again in a few moments.")
-                    # Don't raise, return False to allow manual retry
-                    return False
-                self.logger.error("Non-JSON response from token endpoint: %s", r.text[:500])
-                self.logger.error("Parse error: %s", e)
-                # Only raise for non-503 errors
-                if r.status_code != 503:
-                    r.raise_for_status()
-                return False
-
-            # Check for errors
-            if r.status_code != 200:
-                msg = data.get("message") or data.get("error") or data.get("error_description") or r.text
-                self.logger.error("Token exchange failed (%s): %s", r.status_code, msg)
-                self.logger.debug("Full response: %s", data)
-                
-                # If 401, try multiple fallback strategies
-                if r.status_code == 401 and "authenticate" in str(msg).lower():
-                    # Strategy 1: Try with full client_id (with -100)
-                    self.logger.warning("401 error, trying fallback strategies...")
-                    self.logger.warning("Fallback 1: Trying with full client_id (including -100)...")
-                    app_id_hash_full = self._calc_app_id_hash(use_base_app_id=False)
-                    payload_fallback = {
-                        "grant_type": "authorization_code",
-                        "appIdHash": app_id_hash_full,
-                        "code": auth_code
-                    }
-                    self.logger.debug("Retry payload: appIdHash=%s...", app_id_hash_full[:20])
+                if access_token:
+                    with self._token_lock:
+                        self.access_token = access_token
+                        self.refresh_token = refresh_token or self.refresh_token
+                        
+                        # Calculate expiry (typically 24 hours for Fyers)
+                        expires_in = response.get('expires_in', 86400)
+                        try:
+                            expires_in = int(expires_in)
+                        except (ValueError, TypeError):
+                            expires_in = 86400
+                        
+                        self.token_expiry = datetime.now() + timedelta(seconds=expires_in)
                     
-                    # Try with trading environment endpoint (should match auth_code source)
-                    r_fallback = requests.post(self.TOKEN_URL_T1, json=payload_fallback, headers=headers, timeout=30)
-                    try:
-                        data_fallback = r_fallback.json()
-                        if r_fallback.status_code == 200 and (data_fallback.get("s") == "ok" or data_fallback.get("access_token")):
-                            self.logger.info("Token exchange succeeded with full client_id format")
-                            # Process success response (same as below)
-                            with self._token_lock:
-                                access_token = data_fallback.get("access_token")
-                                refresh_token = data_fallback.get("refresh_token")
-                                if access_token:
-                                    self.access_token = access_token
-                                    self.refresh_token = refresh_token or self.refresh_token
-                                    expires_in = int(data_fallback.get("expires_in", 86400))
-                                    self.token_expiry = datetime.now() + timedelta(seconds=expires_in)
-                                    self._save_tokens()
-                                    self.logger.info("Token exchange successful. Access token expires at: %s", self.token_expiry.isoformat())
-                                    return True
-                    except Exception as e:
-                        self.logger.error("Fallback attempt also failed: %s", e)
-                
-                # Provide helpful error messages
-                if "expired" in str(msg).lower():
-                    self.logger.error("Auth code has expired. Please generate a new one.")
-                elif "invalid" in str(msg).lower() or "authenticate" in str(msg).lower():
-                    self.logger.error("Invalid auth code or appIdHash. Check your credentials.")
-                    self.logger.error("Tried both base app_id and full client_id formats.")
-                
-                return False
-
-            # Check success status (Fyers API returns 's': 'ok' and 'code': 200)
-            if data.get("s") == "ok" or (data.get("code") == 200 and data.get("access_token")):
-                with self._token_lock:
-                    # Extract tokens from response
-                    access_token = data.get("access_token")
-                    refresh_token = data.get("refresh_token")
+                    self._save_tokens()
+                    self.logger.info("Token generation successful. Access token expires at: %s", self.token_expiry.isoformat())
                     
-                    if not access_token:
-                        self.logger.error("Token exchange succeeded but no access_token in response: %s", data)
-                        return False
+                    # Start refresh thread if refresh_token available
+                    if self.refresh_token:
+                        self._start_token_refresh()
                     
-                    self.access_token = access_token
-                    self.refresh_token = refresh_token or self.refresh_token
-                    
-                    # Calculate expiry (typically 24 hours for Fyers)
-                    expires_in = data.get("expires_in", 86400)
-                    try:
-                        expires_in = int(expires_in)
-                    except (ValueError, TypeError):
-                        expires_in = 86400  # Default to 24 hours
-                    
-                    self.token_expiry = datetime.now() + timedelta(seconds=expires_in)
-                
-                self._save_tokens()
-                self.logger.info("Token exchange successful. Access token expires at: %s", self.token_expiry.isoformat())
-                self.logger.debug("Access token prefix: %s...", self.access_token[:20] if self.access_token else "None")
-                self.logger.debug("Refresh token prefix: %s...", self.refresh_token[:20] if self.refresh_token else "None")
-                return True
+                    return response
+                else:
+                    self.logger.error("SDK returned success but no access_token in response")
+                    return {'s': 'error', 'message': 'No access_token in response'}
             else:
-                # Response indicates failure
-                msg = data.get("message") or data.get("error") or "Unknown error"
-                self.logger.error("Token exchange failed: %s", msg)
-                self.logger.debug("Full response: %s", data)
+                error_msg = response.get('message', 'Unknown error')
+                self.logger.error("Token generation failed: %s", error_msg)
+                return response
+                
+        except Exception as e:
+            self.logger.error("Error generating token via SDK: %s", e)
+            return {'s': 'error', 'message': str(e)}
+    
+    def _exchange_code_for_token(self, auth_code: str) -> bool:
+        """
+        Exchange authorization code for access token using Fyers SDK.
+        This is a wrapper around SDK's set_token + generate_token.
+        
+        Args:
+            auth_code: Authorization code from OAuth2 flow
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Use SDK methods
+            self.set_token(auth_code)
+            response = self.generate_token()
+            
+            return response.get('s') == 'ok'
+            
+        except Exception as e:
+            self.logger.error("Error exchanging code for token via SDK: %s", e)
+            return False
+    
+    def refresh_access_token(self) -> bool:
+        """
+        Refresh access token using refresh_token via Fyers SDK.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.refresh_token:
+            self.logger.warning("No refresh_token available for refresh")
+            return False
+        
+        if not self._session:
+            raise FyersAuthError("Session not initialized")
+        
+        try:
+            # SDK handles refresh token internally
+            # We need to set the refresh token and call generate_token
+            # Note: SDK may handle this differently, check SDK docs
+            self.logger.info("Refreshing access token via SDK...")
+            
+            # Try using SDK's refresh mechanism if available
+            # If SDK doesn't have direct refresh, we'll need to implement manually
+            # For now, re-initialize session with refresh_token if SDK supports it
+            
+            # Manual refresh using refresh_token endpoint
+            # SDK might not expose refresh directly, so we implement it
+            refresh_payload = {
+                "grant_type": "refresh_token",
+                "appIdHash": self._calc_app_id_hash(),
+                "refresh_token": self.refresh_token
+            }
+            
+            # Use SDK's internal token endpoint if available, otherwise manual
+            # For now, use manual refresh since SDK may not expose refresh endpoint
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            refresh_url = "https://api-t1.fyers.in/api/v3/token"
+            
+            r = requests.post(refresh_url, json=refresh_payload, headers=headers, timeout=30)
+            
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("s") == "ok" or data.get("access_token"):
+                    with self._token_lock:
+                        self.access_token = data.get("access_token")
+                        new_refresh = data.get("refresh_token")
+                        if new_refresh:
+                            self.refresh_token = new_refresh
+                        
+                        expires_in = int(data.get("expires_in", 86400))
+                        self.token_expiry = datetime.now() + timedelta(seconds=expires_in)
+                    
+                    self._save_tokens()
+                    self.logger.info("Token refresh successful. New expiry: %s", self.token_expiry.isoformat())
+                    return True
+                else:
+                    self.logger.error("Refresh failed: %s", data.get("message", "Unknown error"))
+                    return False
+            else:
+                self.logger.error("Refresh request failed: %s", r.status_code)
+                try:
+                    error_data = r.json()
+                    self.logger.error("Error details: %s", error_data)
+                except:
+                    self.logger.error("Response: %s", r.text[:200])
                 return False
                 
-        except requests.exceptions.RequestException as e:
-            self.logger.error("Network error during token exchange: %s", e)
-            return False
         except Exception as e:
-            self.logger.error("Unexpected error during token exchange: %s", e)
+            self.logger.error("Error refreshing token: %s", e)
             return False
+    
+    def _calc_app_id_hash(self, use_base_app_id: bool = True) -> str:
+        """
+        Calculate appIdHash for token refresh (SDK may not expose this).
+        FYERS expects SHA256 of the string: "<app_id>:<secret_key>"
+        
+        Args:
+            use_base_app_id: If True, strips -100 suffix from client_id (for v3).
+        
+        Returns:
+            Hex digest (lowercase)
+        """
+        client_id = self.config.get("client_id")
+        secret = self.config.get("secret_key")
+
+        if not client_id or not secret:
+            raise FyersAuthError("Missing client_id or secret_key for appIdHash computation")
+
+        if use_base_app_id:
+            app_id = client_id.rstrip("-100") if client_id.endswith("-100") else client_id
+        else:
+            app_id = client_id
+        
+        raw = f"{app_id}:{secret}"
+        appid_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return appid_hash
+    
+    def _start_token_refresh(self) -> None:
+        """
+        Start background thread for automatic token refresh.
+        """
+        if self._refresh_thread and self._refresh_thread.is_alive():
+            self.logger.debug("Refresh thread already running")
+            return
+        
+        self._stop_refresh.clear()
+        self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
+        self._refresh_thread.start()
+        self.logger.info("Started token refresh thread")
+    
+    def _refresh_loop(self) -> None:
+        """
+        Background loop to refresh tokens before expiry.
+        """
+        refresh_interval = int(self.config.get("token_refresh_interval", 3600))
+        refresh_threshold = int(self.config.get("token_refresh_threshold", 300))
+        
+        while not self._stop_refresh.is_set():
+            try:
+                with self._token_lock:
+                    if not self.token_expiry or not self.refresh_token:
+                        self.logger.warning("No expiry or refresh_token, stopping refresh loop")
+                        break
+                    
+                    time_until_expiry = (self.token_expiry - datetime.now()).total_seconds()
+                
+                if time_until_expiry <= refresh_threshold:
+                    self.logger.info("Token expiring soon (%d seconds), refreshing...", time_until_expiry)
+                    if self.refresh_access_token():
+                        self.logger.info("Token refreshed successfully")
+                    else:
+                        self.logger.error("Token refresh failed, stopping refresh loop")
+                        break
+                
+                # Sleep for refresh_interval or until stop event
+                self._stop_refresh.wait(refresh_interval)
+                
+            except Exception as e:
+                self.logger.error("Error in refresh loop: %s", e)
+                time.sleep(60)  # Wait before retrying
+    
+    def stop_refresh(self) -> None:
+        """Stop the background token refresh thread."""
+        self._stop_refresh.set()
+        if self._refresh_thread and self._refresh_thread.is_alive():
+            self._refresh_thread.join(timeout=5)
+            self.logger.info("Stopped token refresh thread")
 
     def authenticate_interactive(
         self, no_open: bool = False, no_kill: bool = False, use_userdata: bool = False, timeout: Optional[int] = None
@@ -632,14 +721,8 @@ class FyersAuth:
             self.logger.info("Already have valid access token.")
             return True
 
-        client_id = self.config.get("client_id")
-        redirect_uri = self.config.get("redirect_uri")
-        state = self.config.get("state", "")
-        scope = self.config.get("scope", "")
-        auth_url = (
-            f"https://api-t1.fyers.in/api/v3/generate-authcode?client_id={client_id}"
-            f"&redirect_uri={redirect_uri}&response_type=code&state={state}&scope={scope}"
-        )
+        # Generate auth URL using SDK
+        auth_url = self.get_auth_url()
 
         # Detect profile
         user_data_parent = get_chrome_user_data_dir()
@@ -689,9 +772,12 @@ class FyersAuth:
             self.logger.debug("Waiting 1 second before token exchange...")
             time.sleep(1)
             
-            # exchange
-            if not self._exchange_code_for_token(auth_code):
-                raise FyersAuthError("Token exchange failed for provided auth_code")
+            # Set token and generate access token (matching fyers_apiv3 API style)
+            self.set_token(auth_code)
+            response = self.generate_token()
+            
+            if response.get('s') != 'ok':
+                raise FyersAuthError(f"Token exchange failed: {response.get('message', 'Unknown error')}")
             return True
 
         except FyersAuthError as e:
