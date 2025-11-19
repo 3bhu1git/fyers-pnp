@@ -1,0 +1,13 @@
+{
+  "port": 8000,
+  "token_file": "fyers_token.json",
+  "log_file": "logs/fyers_auth.log",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
+  "token_refresh_interval": 3600,
+  "token_refresh_threshold": 300,
+  "open_browser": true,
+  "chrome_profile": "Thribhuvan",
+  "auth_timeout": 300
+}
+
