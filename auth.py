@@ -711,13 +711,26 @@ class FyersAuth:
             self.logger.info("Stopped token refresh thread")
 
     def authenticate_interactive(
-        self, no_open: bool = False, no_kill: bool = False, use_userdata: bool = False, timeout: Optional[int] = None
+        self, no_open: bool = False, no_kill: bool = False, use_userdata: bool = False, timeout: Optional[int] = None, force: bool = False
     ) -> bool:
+        """
+        Authenticate interactively via browser.
+        
+        Args:
+            no_open: Don't open browser automatically
+            no_kill: Don't kill existing Chrome processes
+            use_userdata: Use Chrome user data directory
+            timeout: Authentication timeout in seconds
+            force: Force re-authentication even if token exists
+        
+        Returns:
+            True if authentication successful, False otherwise
+        """
         if timeout is None:
             timeout = int(self.config.get("auth_timeout", 300))
 
-        # If we already have valid token, return
-        if self.access_token and self.token_expiry and self.token_expiry > datetime.now():
+        # If we already have valid token and not forcing, return
+        if not force and self.access_token and self.token_expiry and self.token_expiry > datetime.now():
             self.logger.info("Already have valid access token.")
             return True
 

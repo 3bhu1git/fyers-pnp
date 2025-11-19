@@ -1,15 +1,51 @@
 # Fyers Trading API Wrapper - Dependencies
 # Python 3.8+ required
+#
+# Install with: pip install -r requirements.txt
 
-# Core dependencies
+# ============================================================================
+# Core Dependencies
+# ============================================================================
+
+# HTTP client for API requests
 requests>=2.31.0,<3.0.0
+
+# YAML parser for configuration files (creds.yaml)
 PyYAML>=6.0.1,<7.0.0
+
+# Fyers API v3 SDK
 fyers-apiv3>=3.0.0
 
-# Optional: For enhanced HTTP client features
-# urllib3>=2.0.0,<3.0.0  # Included with requests
+# Required by fyers-apiv3 WebSocket module
+setuptools>=65.0.0
 
-# Development dependencies (install with: pip install -r requirements-dev.txt)
+# ============================================================================
+# Standard Library Modules (no installation needed)
+# ============================================================================
+# These are part of Python standard library:
+# - argparse, csv, json, logging, sys, os, pathlib, typing
+# - datetime, threading, queue, sqlite3
+# - http.server, urllib.parse, base64, hashlib
+# - subprocess, tempfile, shutil, socket, signal, webbrowser
+
+# ============================================================================
+# Optional Dependencies (uncomment if needed)
+# ============================================================================
+
+# For enhanced HTTP client features (included with requests)
+# urllib3>=2.0.0,<3.0.0
+
+# For data analysis (if you want to analyze stored data)
+# pandas>=2.0.0,<3.0.0
+# numpy>=1.24.0,<2.0.0
+
+# For visualization (if you want to plot price/volume charts)
+# matplotlib>=3.7.0,<4.0.0
+# seaborn>=0.12.0,<1.0.0
+
+# ============================================================================
+# Development Dependencies (install separately with: pip install -r requirements-dev.txt)
+# ============================================================================
 # pytest>=7.4.0
 # pytest-cov>=4.1.0
 # pytest-mock>=3.11.0

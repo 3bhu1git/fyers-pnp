@@ -17,6 +17,8 @@ Production-ready Python wrapper for Fyers Trading API v3 with low latency, compr
 ```
 fyers-pnp/
 ├── auth.py                # Authentication module (single file)
+├── realtime_data.py      # Realtime market data module (WebSocket)
+├── example_realtime.py    # Example: Fetch Nifty options data
 ├── creds.yaml.example     # Credentials template (sensitive data)
 ├── config.json.example    # Configuration template (non-sensitive)
 ├── requirements.txt       # Python dependencies
@@ -63,18 +65,47 @@ Edit `config.json` with non-sensitive configuration (optional - defaults will be
 - `token_refresh_interval`: Token refresh check interval in seconds
 - `token_refresh_threshold`: Refresh token if expires within this many seconds
 
-### 4. Run Authentication
+## Usage
+
+### Authentication
 
 ```bash
 python auth.py
 ```
 
-Follow the prompts to authorize the application. The module will:
-1. Generate authorization URL
-2. Start local server to capture code
-3. Exchange code for access token
-4. Save tokens to disk
-5. Start background token refresh thread
+This will:
+1. Load credentials from `creds.yaml`
+2. Generate authorization URL
+3. Open browser for OAuth flow
+4. Capture auth code and exchange for tokens
+5. Save tokens to disk
+
+### Realtime Market Data
+
+Fetch realtime Nifty options data:
+
+```bash
+# Using specific symbols
+python realtime_data.py --symbols "NSE:NIFTY24NOV18000CE,NSE:NIFTY24NOV18000PE"
+
+# Generate symbols from expiry and strikes
+python realtime_data.py --expiry 2024-11-28 --strikes 18000,18500,19000
+
+# Only Call options
+python realtime_data.py --expiry 2024-11-28 --strikes 18000,18500 --option-type CE
+```
+
+**Symbol Format:**
+- Format: `NSE:NIFTY<YY><MMM><STRIKE><CE/PE>`
+- Example: `NSE:NIFTY24NOV18000CE` (Nifty Call Option, Strike 18000, Expiry Nov 2024)
+
+**Features:**
+- Automatic authentication
+- WebSocket connection management
+- Auto-reconnect on disconnect
+- Real-time data callbacks
+- Comprehensive logging
+- Graceful shutdown (Ctrl+C)
 
 ## Usage
 
@@ -244,6 +275,8 @@ The module raises `FyersAuthError` for authentication failures. All errors are l
 
 - `requests>=2.31.0`: HTTP client for API calls
 - `PyYAML>=6.0.1`: YAML configuration file parser
+- `fyers-apiv3>=3.0.0`: Official Fyers API SDK
+- `websocket-client>=1.6.1`: WebSocket client (included with fyers-apiv3)
 
 ## License
 
@@ -253,8 +286,5 @@ MIT License - See LICENSE file for details
 
 Future modules to be added:
 - Order management module
-- Real-time data consumption module
 - Portfolio management module
-- Market data module
-
-# fyers-pnp
+- Advanced market data analysis
